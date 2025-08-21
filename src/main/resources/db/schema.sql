@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS users_audit (
+    id SERIAL NOT NULL,
+    user_id INT NOT NULL,
+    data JSON NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id)
+);
