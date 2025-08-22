@@ -2,21 +2,18 @@ package net.samitkumar.spring_data_jdbc;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.Nonnull;
 import lombok.RequiredArgsConstructor;
+import org.postgresql.util.PGobject;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.data.annotation.Id;
-import org.springframework.data.convert.ReadingConverter;
-import org.springframework.data.convert.WritingConverter;
 import org.springframework.data.jdbc.core.convert.JdbcCustomConversions;
-import org.springframework.data.relational.core.mapping.Column;
 import org.springframework.data.relational.core.mapping.Table;
 import org.springframework.data.repository.ListCrudRepository;
-import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -29,6 +26,8 @@ import org.springframework.web.service.annotation.HttpExchange;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+
+import java.util.List;
 
 @SpringBootApplication
 public class SpringDataJdbcApplication {
@@ -45,17 +44,24 @@ public class SpringDataJdbcApplication {
 	}
 
 	@Bean
-	JdbcCustomConversions jdbcCustomConversions(
-			StringToUserReadingConverter stringToUserReadingConverter,
-			UserToStringWritingConverter userToStringWritingConverter) {
+	JdbcCustomConversions jdbcCustomConversions() {
 		return new JdbcCustomConversions(
-				java.util.List.of(stringToUserReadingConverter, userToStringWritingConverter));
+				List.of(
+						new UserToStringConverter(),
+						new PGobjectToUserConverter()
+                )
+		);
 	}
 
 	@Bean
 	RouterFunction<ServerResponse> routerFunction(UserService userService) {
 		return RouterFunctions
 				.route()
+				.path("/db", builder -> builder
+						.GET("", request -> userService.getAllDbUsers().flatMap(ServerResponse.ok()::bodyValue))
+						.GET("/{id}", request -> userService.getDbUserById(request.pathVariable("id")).flatMap(ServerResponse.ok()::bodyValue))
+						.build()
+				)
 				.GET("/user/{id}", request -> {
 					var id = request.pathVariable("id");
 					return userService
@@ -92,15 +98,24 @@ class UserService {
 				.getUserById(id)
 				.flatMap(user -> {
                     try {
-                        var data = objectMapper.writeValueAsString(user);
 						var userAudit = new UserAudit(null, Integer.valueOf(id), user);
 						return Mono.fromCallable(() -> userAuditRepository.save(userAudit))
 								.subscribeOn(Schedulers.boundedElastic())
 								.thenReturn(user);
-                    } catch (JsonProcessingException e) {
+                    } catch (Exception e) {
                         return Mono.error(new RuntimeException(e));
                     }
 				});
+	}
+
+	public Mono<List<UserAudit>> getAllDbUsers() {
+		return Mono.fromCallable(userAuditRepository::findAll)
+				.subscribeOn(Schedulers.boundedElastic());
+	}
+
+	public Mono<UserAudit> getDbUserById(String id) {
+		return Mono.fromCallable(() -> userAuditRepository.findById(Integer.valueOf(id)).orElseThrow())
+				.subscribeOn(Schedulers.boundedElastic());
 	}
 }
 
@@ -108,37 +123,22 @@ class UserService {
 record UserAudit(@Id Integer id, Integer userId, User data){}
 interface UserAuditRepository extends ListCrudRepository<UserAudit, Integer> {}
 
-@WritingConverter
-@Component
-class UserToStringWritingConverter implements Converter<User, String> {
-	final ObjectMapper objectMapper;
-
-	public UserToStringWritingConverter(ObjectMapper objectMapper) {
-		this.objectMapper = objectMapper;
-	}
+class UserToStringConverter implements Converter<User, String> {
 	@Override
-	public String convert(User user) {
+	public String convert(@Nonnull User user) {
 		try {
-			return objectMapper.writeValueAsString(user);
+			return new ObjectMapper().writeValueAsString(user);
 		} catch (JsonProcessingException e) {
 			throw new RuntimeException(e);
 		}
 	}
 }
 
-@ReadingConverter
-@Component
-class StringToUserReadingConverter implements Converter<String, User> {
-	final ObjectMapper objectMapper;
-
-	public StringToUserReadingConverter(ObjectMapper objectMapper) {
-		this.objectMapper = objectMapper;
-	}
-
+class PGobjectToUserConverter implements Converter<PGobject, User> {
 	@Override
-	public User convert(String source) {
+	public User convert(PGobject source) {
 		try {
-			return objectMapper.readValue(source, User.class);
+			return new ObjectMapper().readValue(source.getValue(), User.class);
 		} catch (JsonProcessingException e) {
 			throw new RuntimeException(e);
 		}
