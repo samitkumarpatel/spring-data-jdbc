@@ -1,20 +1,20 @@
 package net.samitkumar.spring_data_jdbc;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.r2dbc.postgresql.codec.Json;
 import jakarta.annotation.Nonnull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.postgresql.util.PGobject;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.data.annotation.Id;
-import org.springframework.data.jdbc.core.convert.JdbcCustomConversions;
+import org.springframework.data.r2dbc.config.AbstractR2dbcConfiguration;
+import org.springframework.data.r2dbc.repository.R2dbcRepository;
 import org.springframework.data.relational.core.mapping.Table;
-import org.springframework.data.repository.ListCrudRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -27,8 +27,8 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.service.annotation.GetExchange;
 import org.springframework.web.service.annotation.HttpExchange;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 
@@ -46,22 +46,15 @@ public class SpringDataJdbcApplication {
 		return factory.createClient(JsonPlaceholderClient.class);
 	}
 
-	@Bean
-	JdbcCustomConversions jdbcCustomConversions() {
-		return new JdbcCustomConversions(
-				List.of(
-						new UserToStringConverter(),
-						new PGobjectToUserConverter()
-                )
-		);
-	}
+	//Register converters for JSON to User and vice versa
+	
 
 	@Bean
 	RouterFunction<ServerResponse> routerFunction(UserService userService) {
 		return RouterFunctions
 				.route()
 				.path("/db", builder -> builder
-						.GET("", request -> userService.getAllDbUsers().flatMap(ServerResponse.ok()::bodyValue))
+						.GET("", request -> userService.getAllDbUsers().collectList().flatMap(ServerResponse.ok()::bodyValue))
 						.GET("/{id}", request -> userService.getDbUserById(request.pathVariable("id")).flatMap(ServerResponse.ok()::bodyValue))
 						.build()
 				)
@@ -95,59 +88,29 @@ interface JsonPlaceholderClient {
 class UserService {
 	final JsonPlaceholderClient jsonPlaceholderClient;
 	final UserAuditRepository userAuditRepository;
-	final ObjectMapper objectMapper;
 
 	public Mono<User> getUserById(String id) {
-		return Mono.fromCallable(() -> userAuditRepository
-				.findById(Integer.valueOf(id)).orElse(new UserAudit(null,null,null)))
-				.subscribeOn(Schedulers.boundedElastic())
-				.doOnSuccess(u -> log.info("DB user value {}", u))
-				.mapNotNull(UserAudit::data)
-				.switchIfEmpty(jsonPlaceholderClient.getUserById(id)
-						.mapNotNull(u -> new UserAudit(null, Integer.valueOf(id), u))
-						.doOnSuccess(u -> log.info("WEB user value {}", u))
-						.onErrorResume(e -> Mono.error(new UserNotFoundException(e.getMessage())))
-						.mapNotNull(userAuditRepository::save)
-						.map(UserAudit::data));
+		return jsonPlaceholderClient
+				.getUserById(id)
+				.onErrorResume(e -> Mono.error(new UserNotFoundException(e.getMessage())))
+				.map(u -> new UserAudit(null, Integer.valueOf(u.id()), u))
+				.flatMap(userAuditRepository::save)
+				.map(UserAudit::data);
 	}
 
-	public Mono<List<UserAudit>> getAllDbUsers() {
-		return Mono.fromCallable(userAuditRepository::findAll)
-				.subscribeOn(Schedulers.boundedElastic());
+	public Flux<UserAudit> getAllDbUsers() {
+		return userAuditRepository.findAll();
 	}
 
 	public Mono<UserAudit> getDbUserById(String id) {
-		return Mono.fromCallable(() -> userAuditRepository.findById(Integer.valueOf(id)).orElseThrow())
-				.subscribeOn(Schedulers.boundedElastic());
+		return userAuditRepository
+				.findById(Integer.valueOf(id));
 	}
 }
 
 @Table(name = "users_audit")
 record UserAudit(@Id Integer id, Integer userId, User data){}
-interface UserAuditRepository extends ListCrudRepository<UserAudit, Integer> {}
-
-class UserToStringConverter implements Converter<User, String> {
-	@Override
-	public String convert(@Nonnull User user) {
-		try {
-			return new ObjectMapper().writeValueAsString(user);
-		} catch (JsonProcessingException e) {
-			throw new RuntimeException(e);
-		}
-	}
-}
-
-class PGobjectToUserConverter implements Converter<PGobject, User> {
-	@Override
-	public User convert(PGobject source) {
-		try {
-			return new ObjectMapper().readValue(source.getValue(), User.class);
-		} catch (JsonProcessingException e) {
-			throw new RuntimeException(e);
-		}
-	}
-}
-
+interface UserAuditRepository extends R2dbcRepository<UserAudit, Integer> {}
 
 @ResponseStatus(HttpStatus.NOT_FOUND)
 class UserNotFoundException extends RuntimeException {
@@ -158,5 +121,27 @@ class UserNotFoundException extends RuntimeException {
 
 	public UserNotFoundException(String message) {
 		super(message);
+	}
+}
+
+class UserToJsonConvertor implements Converter<User, Json>	{
+	@Override
+	public Json convert(@Nonnull User user) {
+		try {
+			return Json.of(new ObjectMapper().writeValueAsString(user));
+		} catch (Exception e) {
+			throw new RuntimeException("Error converting User to JSON", e);
+		}
+	}
+}
+
+class JsonToUserConvertor implements Converter<Json, User> {
+	@Override
+	public User convert(@Nonnull Json json) {
+		try {
+			return new ObjectMapper().readValue(json.asString(), User.class);
+		} catch (Exception e) {
+			throw new RuntimeException("Error converting JSON to User", e);
+		}
 	}
 }
