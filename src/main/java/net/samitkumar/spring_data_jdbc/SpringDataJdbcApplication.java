@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.Nonnull;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.postgresql.util.PGobject;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
@@ -14,8 +15,10 @@ import org.springframework.data.annotation.Id;
 import org.springframework.data.jdbc.core.convert.JdbcCustomConversions;
 import org.springframework.data.relational.core.mapping.Table;
 import org.springframework.data.repository.ListCrudRepository;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.support.WebClientAdapter;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -88,24 +91,24 @@ interface JsonPlaceholderClient {
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 class UserService {
 	final JsonPlaceholderClient jsonPlaceholderClient;
 	final UserAuditRepository userAuditRepository;
 	final ObjectMapper objectMapper;
 
 	public Mono<User> getUserById(String id) {
-		return jsonPlaceholderClient
-				.getUserById(id)
-				.flatMap(user -> {
-                    try {
-						var userAudit = new UserAudit(null, Integer.valueOf(id), user);
-						return Mono.fromCallable(() -> userAuditRepository.save(userAudit))
-								.subscribeOn(Schedulers.boundedElastic())
-								.thenReturn(user);
-                    } catch (Exception e) {
-                        return Mono.error(new RuntimeException(e));
-                    }
-				});
+		return Mono.fromCallable(() -> userAuditRepository
+				.findById(Integer.valueOf(id)).orElse(new UserAudit(null,null,null)))
+				.subscribeOn(Schedulers.boundedElastic())
+				.doOnSuccess(u -> log.info("DB user value {}", u))
+				.mapNotNull(UserAudit::data)
+				.switchIfEmpty(jsonPlaceholderClient.getUserById(id)
+						.mapNotNull(u -> new UserAudit(null, Integer.valueOf(id), u))
+						.doOnSuccess(u -> log.info("WEB user value {}", u))
+						.onErrorResume(e -> Mono.error(new UserNotFoundException(e.getMessage())))
+						.mapNotNull(userAuditRepository::save)
+						.map(UserAudit::data));
 	}
 
 	public Mono<List<UserAudit>> getAllDbUsers() {
@@ -142,5 +145,18 @@ class PGobjectToUserConverter implements Converter<PGobject, User> {
 		} catch (JsonProcessingException e) {
 			throw new RuntimeException(e);
 		}
+	}
+}
+
+
+@ResponseStatus(HttpStatus.NOT_FOUND)
+class UserNotFoundException extends RuntimeException {
+
+	public UserNotFoundException() {
+		super("User not found");
+	}
+
+	public UserNotFoundException(String message) {
+		super(message);
 	}
 }
