@@ -2,6 +2,8 @@ package net.samitkumar.spring_data_jdbc;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.postgresql.codec.Json;
+import io.r2dbc.spi.ConnectionFactories;
+import io.r2dbc.spi.ConnectionFactory;
 import jakarta.annotation.Nonnull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -46,9 +48,6 @@ public class SpringDataJdbcApplication {
 		return factory.createClient(JsonPlaceholderClient.class);
 	}
 
-	//Register converters for JSON to User and vice versa
-	
-
 	@Bean
 	RouterFunction<ServerResponse> routerFunction(UserService userService) {
 		return RouterFunctions
@@ -90,12 +89,16 @@ class UserService {
 	final UserAuditRepository userAuditRepository;
 
 	public Mono<User> getUserById(String id) {
-		return jsonPlaceholderClient
-				.getUserById(id)
-				.onErrorResume(e -> Mono.error(new UserNotFoundException(e.getMessage())))
-				.map(u -> new UserAudit(null, Integer.valueOf(u.id()), u))
-				.flatMap(userAuditRepository::save)
-				.map(UserAudit::data);
+		return userAuditRepository
+				.findByUserId(Integer.valueOf(id)).mapNotNull(UserAudit::data)
+				.doOnSuccess(u -> log.info("DB getUserById {}", u))
+				.switchIfEmpty(jsonPlaceholderClient
+						.getUserById(id)
+						.doOnSuccess(u -> log.info("WEB getUserById {}", u))
+						.onErrorResume(e -> Mono.error(new UserNotFoundException(e.getMessage())))
+						.map(u -> new UserAudit(null, Integer.valueOf(u.id()), u))
+						.flatMap(userAuditRepository::save)
+						.map(UserAudit::data));
 	}
 
 	public Flux<UserAudit> getAllDbUsers() {
@@ -110,7 +113,9 @@ class UserService {
 
 @Table(name = "users_audit")
 record UserAudit(@Id Integer id, Integer userId, User data){}
-interface UserAuditRepository extends R2dbcRepository<UserAudit, Integer> {}
+interface UserAuditRepository extends R2dbcRepository<UserAudit, Integer> {
+	Mono<UserAudit> findByUserId(Integer userId);
+}
 
 @ResponseStatus(HttpStatus.NOT_FOUND)
 class UserNotFoundException extends RuntimeException {
@@ -143,5 +148,26 @@ class JsonToUserConvertor implements Converter<Json, User> {
 		} catch (Exception e) {
 			throw new RuntimeException("Error converting JSON to User", e);
 		}
+	}
+}
+
+@Configuration
+@RequiredArgsConstructor
+class DbConfig extends AbstractR2dbcConfiguration {
+	final ConnectionFactory connectionFactory;
+
+	@Override
+	@Nonnull
+	public ConnectionFactory connectionFactory() {
+		return connectionFactory;
+	}
+
+	@Override
+	@Nonnull
+	protected List<Object> getCustomConverters() {
+		return List.of(
+				new UserToJsonConvertor(),
+				new JsonToUserConvertor()
+		);
 	}
 }
