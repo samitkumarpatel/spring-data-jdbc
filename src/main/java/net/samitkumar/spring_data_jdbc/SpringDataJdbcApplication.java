@@ -2,7 +2,6 @@ package net.samitkumar.spring_data_jdbc;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.postgresql.codec.Json;
-import io.r2dbc.spi.ConnectionFactories;
 import io.r2dbc.spi.ConnectionFactory;
 import jakarta.annotation.Nonnull;
 import lombok.RequiredArgsConstructor;
@@ -113,6 +112,7 @@ class UserService {
 
 @Table(name = "users_audit")
 record UserAudit(@Id Integer id, Integer userId, User data){}
+
 interface UserAuditRepository extends R2dbcRepository<UserAudit, Integer> {
 	Mono<UserAudit> findByUserId(Integer userId);
 }
