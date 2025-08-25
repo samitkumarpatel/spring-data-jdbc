@@ -9,9 +9,9 @@
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
 	<groupId>net.samitkumar</groupId>
-	<artifactId>spring-data-jdbc</artifactId>
+	<artifactId>spring-data-postgres</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<name>spring-data-jdbc</name>
+	<name>spring-data-postgres</name>
 	<description>Spring Boot With Spring Data JDBC</description>
 	<url/>
 	<licenses>
